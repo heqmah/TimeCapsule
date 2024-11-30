@@ -1,7 +1,11 @@
 ;; TimeCapsule - Decentralized Time-Locked Asset Vault
-;; A secure way to lock STX and fungible tokens with time-based release and beneficiary support
+;; A secure way to lock STX and fungible tokens with time-based release and lock period extension
 
 (define-data-var contract-owner principal tx-sender)
+
+;; Constants for validation
+(define-constant MIN-LOCK-PERIOD u144) ;; Minimum 1 day (assuming 144 blocks per day)
+(define-constant MAX-LOCK-PERIOD u52560) ;; Maximum 1 year
 
 ;; Vault structure
 (define-map vaults
@@ -9,6 +13,7 @@
     {
         amount: uint,
         unlock-height: uint,
+        lock-duration: uint,
         beneficiary: (optional principal),
         grace-period: uint,
         token-type: (string-ascii 32)
@@ -22,6 +27,8 @@
 (define-constant ERR-NOT-UNLOCKED (err u103))
 (define-constant ERR-GRACE-PERIOD-EXPIRED (err u104))
 (define-constant ERR-INSUFFICIENT-FUNDS (err u105))
+(define-constant ERR-INVALID-LOCK-PERIOD (err u106))
+(define-constant ERR-EXTENSION-TOO-SHORT (err u107))
 
 ;; Read-only functions
 (define-read-only (get-vault-details (owner principal))
@@ -36,21 +43,55 @@
     (>= current-height (get unlock-height vault)))
 )
 
-;; Public functions
-(define-public (create-vault (lock-period uint) (beneficiary (optional principal)) (grace-period uint))
+(define-read-only (get-remaining-lock-time (owner principal))
     (let (
-        (unlock-height (+ block-height lock-period))
+        (vault (unwrap! (get-vault-details owner) u0))
+        (current-height block-height)
+    )
+    (if (>= current-height (get unlock-height vault))
+        u0
+        (- (get unlock-height vault) current-height)))
+)
+
+;; Public functions
+(define-public (create-vault (lock-duration uint) (beneficiary (optional principal)) (grace-period uint))
+    (let (
+        (unlock-height (+ block-height lock-duration))
     )
     (asserts! (is-none (get-vault-details tx-sender)) ERR-VAULT-EXISTS)
+    (asserts! (and (>= lock-duration MIN-LOCK-PERIOD) (<= lock-duration MAX-LOCK-PERIOD)) ERR-INVALID-LOCK-PERIOD)
     (map-set vaults
         { owner: tx-sender }
         {
             amount: u0,
             unlock-height: unlock-height,
+            lock-duration: lock-duration,
             beneficiary: beneficiary,
             grace-period: grace-period,
             token-type: "STX"
         }
+    )
+    (ok true))
+)
+
+(define-public (extend-lock-period (extension-blocks uint))
+    (let (
+        (vault (unwrap! (get-vault-details tx-sender) ERR-NO-VAULT))
+        (current-height block-height)
+        (new-unlock-height (+ (get unlock-height vault) extension-blocks))
+        (new-duration (+ (get lock-duration vault) extension-blocks))
+    )
+    ;; Validate extension period
+    (asserts! (>= extension-blocks MIN-LOCK-PERIOD) ERR-EXTENSION-TOO-SHORT)
+    (asserts! (<= new-duration MAX-LOCK-PERIOD) ERR-INVALID-LOCK-PERIOD)
+    
+    ;; Update vault with new unlock height and duration
+    (map-set vaults
+        { owner: tx-sender }
+        (merge vault {
+            unlock-height: new-unlock-height,
+            lock-duration: new-duration
+        })
     )
     (ok true))
 )
